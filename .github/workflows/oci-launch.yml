@@ -1,0 +1,63 @@
+name: OCI A1 launch retry
+
+on:
+  schedule:
+    # 10분마다 (UTC 기준). 비공개 저장소면 무료 시간(월 2,000분) 때문에 '0 * * * *'(매 정시)로 바꾸세요.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write     # 성공 시 이슈 생성 → 이메일 알림
+  actions: write    # 성공 시 이 워크플로 자동 비활성화
+
+concurrency:
+  group: oci-launch
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install oci
+
+      - id: launch
+        name: Try to launch instance
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_COMPARTMENT_OCID: ${{ secrets.OCI_COMPARTMENT_OCID }}
+          OCI_SUBNET_OCID: ${{ secrets.OCI_SUBNET_OCID }}
+          OCI_IMAGE_OCID: ${{ secrets.OCI_IMAGE_OCID }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          INSTANCE_NAME: free-a1
+          OCPUS: "2"
+          MEMORY_GB: "12"
+          BOOT_GB: "100"
+        run: python launch.py
+
+      - name: Notify via issue
+        if: steps.launch.outputs.result == 'created'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "OCI A1 인스턴스 생성 성공" \
+            --body "생성됨: ${{ steps.launch.outputs.detail }}. OCI 콘솔에서 공인 IP를 확인하세요. 재시도 워크플로는 자동으로 꺼졌습니다."
+
+      - name: Disable this workflow
+        if: steps.launch.outputs.result == 'created' || steps.launch.outputs.result == 'exists'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "${{ github.workflow }}"
