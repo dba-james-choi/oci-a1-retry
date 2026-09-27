@@ -1,15 +1,16 @@
 name: OCI A1 launch retry
 
+# 한 번 실행되면 약 5시간 동안 1분마다 시도하고,
+# 실패하면 스스로 다음 실행을 시작한다(예약 실행에 의존하지 않음).
 on:
   schedule:
-    # 10분마다 (UTC 기준). 비공개 저장소면 무료 시간(월 2,000분) 때문에 '0 * * * *'(매 정시)로 바꾸세요.
-    - cron: "*/10 * * * *"
+    - cron: "0 */6 * * *"   # 혹시 체인이 끊겼을 때를 위한 예비 실행
   workflow_dispatch: {}
 
 permissions:
   contents: read
   issues: write     # 성공 시 이슈 생성 → 이메일 알림
-  actions: write    # 성공 시 이 워크플로 자동 비활성화
+  actions: write    # 다음 실행 시작 / 성공 시 워크플로 비활성화
 
 concurrency:
   group: oci-launch
@@ -18,7 +19,7 @@ concurrency:
 jobs:
   launch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v5
 
@@ -29,7 +30,7 @@ jobs:
       - run: pip install oci
 
       - id: launch
-        name: Try to launch instance
+        name: Try to launch instance (loop)
         env:
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
@@ -44,7 +45,21 @@ jobs:
           OCPUS: "2"
           MEMORY_GB: "12"
           BOOT_GB: "100"
-        run: python launch.py
+          ATTEMPTS: "280"   # 약 5시간
+          INTERVAL: "60"    # 초
+        run: |
+          for i in $(seq 1 "$ATTEMPTS"); do
+            echo "=== attempt $i/$ATTEMPTS $(date -u '+%Y-%m-%d %H:%M:%S') UTC ==="
+            : > result.txt
+            GITHUB_OUTPUT=result.txt python launch.py || exit 1
+            r=$(grep '^result=' result.txt | cut -d= -f2)
+            if [ "$r" != "capacity" ]; then
+              cat result.txt >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep "$INTERVAL"
+          done
+          echo "result=capacity" >> "$GITHUB_OUTPUT"
 
       - name: Notify via issue
         if: steps.launch.outputs.result == 'created'
@@ -60,3 +75,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow disable "${{ github.workflow }}"
+
+      - name: Start next run
+        if: steps.launch.outputs.result == 'capacity'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}"
